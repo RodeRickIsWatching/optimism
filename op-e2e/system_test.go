@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/geth"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -105,12 +106,20 @@ func TestL2OutputSubmitter(t *testing.T) {
 	require.Nil(t, err)
 	rollupClient := sources.NewRollupClient(client.NewBaseRPCClient(rollupRPCClient))
 
-	//  OutputOracle is already deployed
 	l2OutputOracle, err := bindings.NewL2OutputOracleCaller(cfg.L1Deployments.L2OutputOracleProxy, l1Client)
 	require.Nil(t, err)
 
-	initialOutputBlockNumber, err := l2OutputOracle.LatestBlockNumber(&bind.CallOpts{})
+	disputeGameFactory, err := bindings.NewDisputeGameFactoryCaller(cfg.L1Deployments.DisputeGameFactoryProxy, l1Client)
 	require.Nil(t, err)
+
+	var initialOutputBlockNumber *big.Int
+	if e2eutils.UseFPAC() {
+		initialOutputBlockNumber, err = disputeGameFactory.GameCount(&bind.CallOpts{})
+		require.Nil(t, err)
+	} else {
+		initialOutputBlockNumber, err = l2OutputOracle.LatestBlockNumber(&bind.CallOpts{})
+		require.Nil(t, err)
+	}
 
 	// Wait until the second output submission from L2. The output submitter submits outputs from the
 	// unsafe portion of the chain which gets reorged on startup. The sequencer has an out of date view
@@ -126,16 +135,35 @@ func TestL2OutputSubmitter(t *testing.T) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
-		l2ooBlockNumber, err := l2OutputOracle.LatestBlockNumber(&bind.CallOpts{})
-		require.Nil(t, err)
+		var l2ooBlockNumber *big.Int
+		if e2eutils.UseFPAC() {
+			l2ooBlockNumber, err = disputeGameFactory.GameCount(&bind.CallOpts{})
+			require.Nil(t, err)
+		} else {
+			l2ooBlockNumber, err = l2OutputOracle.LatestBlockNumber(&bind.CallOpts{})
+			require.Nil(t, err)
+		}
+
+		log.Warn("Waiting for L2 output oracle to update", "l2ooBlockNumber", l2ooBlockNumber, "initialOutputBlockNumber", initialOutputBlockNumber)
 
 		// Wait for the L2 output oracle to have been changed from the initial
 		// timestamp set in the contract constructor.
 		if l2ooBlockNumber.Cmp(initialOutputBlockNumber) > 0 {
 			// Retrieve the l2 output committed at this updated timestamp.
-			committedL2Output, err := l2OutputOracle.GetL2OutputAfter(&bind.CallOpts{}, l2ooBlockNumber)
-			require.NotEqual(t, [32]byte{}, committedL2Output.OutputRoot, "Empty L2 Output")
-			require.Nil(t, err)
+			var committedOutputRoot [32]byte
+			if e2eutils.UseFPAC() {
+				committedL2Output, err := disputeGameFactory.GameAtIndex(&bind.CallOpts{}, new(big.Int).Sub(l2ooBlockNumber, common.Big1))
+				require.Nil(t, err)
+				proxy, err := bindings.NewFaultDisputeGameCaller(committedL2Output.Proxy, l1Client)
+				require.Nil(t, err)
+				committedOutputRoot, err = proxy.RootClaim(&bind.CallOpts{})
+				require.Nil(t, err)
+			} else {
+				committedL2Output, err := l2OutputOracle.GetL2OutputAfter(&bind.CallOpts{}, l2ooBlockNumber)
+				require.NotEqual(t, [32]byte{}, committedL2Output.OutputRoot, "Empty L2 Output")
+				require.Nil(t, err)
+				committedOutputRoot = committedL2Output.OutputRoot
+			}
 
 			// Fetch the corresponding L2 block and assert the committed L2
 			// output matches the block's state root.
@@ -144,9 +172,22 @@ func TestL2OutputSubmitter(t *testing.T) {
 			// finalized.
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			l2Output, err := rollupClient.OutputAtBlock(ctx, l2ooBlockNumber.Uint64())
-			require.Nil(t, err)
-			require.Equal(t, l2Output.OutputRoot[:], committedL2Output.OutputRoot[:])
+			var l2Output *eth.OutputResponse
+			if e2eutils.UseFPAC() {
+				committedL2Output, err := disputeGameFactory.GameAtIndex(&bind.CallOpts{}, new(big.Int).Sub(l2ooBlockNumber, common.Big1))
+				require.Nil(t, err)
+				proxy, err := bindings.NewFaultDisputeGameCaller(committedL2Output.Proxy, l1Client)
+				require.Nil(t, err)
+				extradata, err := proxy.ExtraData(&bind.CallOpts{})
+				require.Nil(t, err)
+				gameBlockNumber := new(big.Int).SetBytes(extradata[0:32])
+				l2Output, err = rollupClient.OutputAtBlock(ctx, gameBlockNumber.Uint64())
+				require.Nil(t, err)
+			} else {
+				l2Output, err = rollupClient.OutputAtBlock(ctx, l2ooBlockNumber.Uint64())
+				require.Nil(t, err)
+			}
+			require.Equal(t, l2Output.OutputRoot[:], committedOutputRoot[:])
 			break
 		}
 
@@ -1074,7 +1115,7 @@ func TestWithdrawals(t *testing.T) {
 	startBalanceBeforeFinalize, err := l1Client.BalanceAt(ctx, fromAddr, nil)
 	require.Nil(t, err)
 
-	proveReceipt, finalizeReceipt := ProveAndFinalizeWithdrawal(t, cfg, sys, "verifier", ethPrivKey, receipt)
+	proveReceipt, finalizeReceipt, resolveClaimReceipt, resolveReceipt := ProveAndFinalizeWithdrawal(t, cfg, sys, "verifier", ethPrivKey, receipt)
 
 	// Verify balance after withdrawal
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
@@ -1089,6 +1130,12 @@ func TestWithdrawals(t *testing.T) {
 	proveFee := new(big.Int).Mul(new(big.Int).SetUint64(proveReceipt.GasUsed), proveReceipt.EffectiveGasPrice)
 	finalizeFee := new(big.Int).Mul(new(big.Int).SetUint64(finalizeReceipt.GasUsed), finalizeReceipt.EffectiveGasPrice)
 	fees = new(big.Int).Add(proveFee, finalizeFee)
+	if e2eutils.UseFPAC() {
+		resolveClaimFee := new(big.Int).Mul(new(big.Int).SetUint64(resolveClaimReceipt.GasUsed), resolveClaimReceipt.EffectiveGasPrice)
+		resolveFee := new(big.Int).Mul(new(big.Int).SetUint64(resolveReceipt.GasUsed), resolveReceipt.EffectiveGasPrice)
+		fees = new(big.Int).Add(fees, resolveClaimFee)
+		fees = new(big.Int).Add(fees, resolveFee)
+	}
 	withdrawAmount = withdrawAmount.Sub(withdrawAmount, fees)
 	require.Equal(t, withdrawAmount, diff)
 }

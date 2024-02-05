@@ -57,6 +57,7 @@ func MakeDeployParams(t require.TestingT, tp *TestParams) *DeployParams {
 	deployConfig.SequencerWindowSize = tp.SequencerWindowSize
 	deployConfig.ChannelTimeout = tp.ChannelTimeout
 	deployConfig.L1BlockTime = tp.L1BlockTime
+	deployConfig.UseFaultProofs = UseFPAC()
 	ApplyDeployConfigForks(deployConfig)
 
 	require.NoError(t, deployConfig.Check())
@@ -203,4 +204,8 @@ func ApplyDeployConfigForks(deployConfig *genesis.DeployConfig) {
 	// Canyon and lower is activated by default
 	deployConfig.L2GenesisCanyonTimeOffset = new(hexutil.Uint64)
 	deployConfig.L2GenesisRegolithTimeOffset = new(hexutil.Uint64)
+}
+
+func UseFPAC() bool {
+	return os.Getenv("OP_E2E_USE_FPAC") == "true"
 }

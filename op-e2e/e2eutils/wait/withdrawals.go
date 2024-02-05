@@ -7,15 +7,19 @@ import (
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-bindings/bindings"
+	"github.com/ethereum-optimism/optimism/op-chain-ops/crossdomain"
+	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils"
+	"github.com/ethereum-optimism/optimism/op-node/withdrawals"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // ForOutputRootPublished waits until there is an output published for an L2 block number larger than the supplied l2BlockNumber
 // This function polls and can block for a very long time if used on mainnet.
 // This returns the block number to use for proof generation.
-func ForOutputRootPublished(ctx context.Context, client *ethclient.Client, l2OutputOracleAddr common.Address, l2BlockNumber *big.Int) (uint64, error) {
+func ForOutputRootPublished(ctx context.Context, client *ethclient.Client, l2OutputOracleAddr common.Address, optimismPortalAddr common.Address, disputeGameFactoryAddr common.Address, l2BlockNumber *big.Int) (uint64, error) {
 	l2BlockNumber = new(big.Int).Set(l2BlockNumber) // Don't clobber caller owned l2BlockNumber
 	opts := &bind.CallOpts{Context: ctx}
 
@@ -24,8 +28,37 @@ func ForOutputRootPublished(ctx context.Context, client *ethclient.Client, l2Out
 		return 0, err
 	}
 
-	getL2BlockFromLatestOutput := func() (*big.Int, error) { return l2OO.LatestBlockNumber(opts) }
-	outputBlockNum, err := AndGet(ctx, time.Second, getL2BlockFromLatestOutput, func(latest *big.Int) bool {
+	optimismPortal2Contract, err := bindings.NewOptimismPortal2Caller(optimismPortalAddr, client)
+	if err != nil {
+		return 0, err
+	}
+
+	disputeGameFactoryContract, err := bindings.NewDisputeGameFactoryCaller(disputeGameFactoryAddr, client)
+	if err != nil {
+		return 0, err
+	}
+
+	var getL2BlockFunc func() (*big.Int, error)
+	if e2eutils.UseFPAC() {
+		getL2BlockFunc = func() (*big.Int, error) {
+			latestGame, err := withdrawals.FindLatestGame(ctx, disputeGameFactoryContract, optimismPortal2Contract)
+			if err != nil {
+				log.Warn("error finding latest game", "err", err)
+				return big.NewInt(-1), nil
+			}
+
+			gameBlockNumber := new(big.Int).SetBytes(latestGame.ExtraData[0:32])
+
+			// log it here
+			log.Warn("latest game", "gameBlockNumber", gameBlockNumber, "l2BlockNumber", l2BlockNumber)
+
+			return gameBlockNumber, nil
+		}
+	} else {
+		getL2BlockFunc = func() (*big.Int, error) { return l2OO.LatestBlockNumber(opts) }
+	}
+
+	outputBlockNum, err := AndGet(ctx, time.Second, getL2BlockFunc, func(latest *big.Int) bool {
 		return latest.Cmp(l2BlockNumber) >= 0
 	})
 	if err != nil {
@@ -67,5 +100,25 @@ func ForFinalizationPeriod(ctx context.Context, client *ethclient.Client, l1Prov
 			return false, fmt.Errorf("retrieve latest header: %w", err)
 		}
 		return header.Time > targetTimestamp.Uint64(), nil
+	})
+}
+
+func ForWithdrawalCheck(ctx context.Context, client *ethclient.Client, withdrawal crossdomain.Withdrawal, optimismPortalAddr common.Address) error {
+	opts := &bind.CallOpts{Context: ctx}
+	portal, err := bindings.NewOptimismPortal2Caller(optimismPortalAddr, client)
+	if err != nil {
+		return fmt.Errorf("create portal caller: %w", err)
+	}
+
+	return For(ctx, time.Second, func() (bool, error) {
+		log.Warn("checking withdrawal!")
+		wdHash, err := withdrawal.Hash()
+		if err != nil {
+			return false, fmt.Errorf("hash withdrawal: %w", err)
+		}
+
+		err = portal.CheckWithdrawal(opts, wdHash)
+		log.Warn("checking withdrawal", "hash", wdHash, "err", err)
+		return err == nil, nil
 	})
 }

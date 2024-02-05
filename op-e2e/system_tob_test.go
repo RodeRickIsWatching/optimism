@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-bindings/bindings"
 	"github.com/ethereum-optimism/optimism/op-bindings/predeploys"
+	"github.com/ethereum-optimism/optimism/op-chain-ops/crossdomain"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/geth"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/wait"
@@ -442,6 +443,15 @@ func TestMixedWithdrawalValidity(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, cfg.DeployConfig.FinalizationPeriodSeconds, finalizationPeriod.Uint64())
 
+			disputeGameFactory, err := bindings.NewDisputeGameFactoryCaller(cfg.L1Deployments.DisputeGameFactoryProxy, l1Client)
+			require.NoError(t, err)
+
+			optimismPortal, err := bindings.NewOptimismPortalCaller(cfg.L1Deployments.OptimismPortalProxy, l1Client)
+			require.NoError(t, err)
+
+			optimismPortal2, err := bindings.NewOptimismPortal2Caller(cfg.L1Deployments.OptimismPortalProxy, l1Client)
+			require.NoError(t, err)
+
 			// Create a struct used to track our transactors and their transactions sent.
 			type TestAccountState struct {
 				Account           *TestAccount
@@ -534,9 +544,9 @@ func TestMixedWithdrawalValidity(t *testing.T) {
 			transactor.ExpectedL2Nonce = transactor.ExpectedL2Nonce + 1
 
 			// Wait for the finalization period, then we can finalize this withdrawal.
-			ctx, cancel = context.WithTimeout(context.Background(), 40*time.Duration(cfg.DeployConfig.L1BlockTime)*time.Second)
+			ctx, cancel = context.WithTimeout(context.Background(), 60*time.Duration(cfg.DeployConfig.L1BlockTime)*time.Second)
 			require.NotEqual(t, cfg.L1Deployments.L2OutputOracleProxy, common.Address{})
-			blockNumber, err := wait.ForOutputRootPublished(ctx, l1Client, cfg.L1Deployments.L2OutputOracleProxy, receipt.BlockNumber)
+			blockNumber, err := wait.ForOutputRootPublished(ctx, l1Client, cfg.L1Deployments.L2OutputOracleProxy, cfg.L1Deployments.OptimismPortalProxy, cfg.L1Deployments.DisputeGameFactoryProxy, receipt.BlockNumber)
 			cancel()
 			require.Nil(t, err)
 
@@ -549,20 +559,22 @@ func TestMixedWithdrawalValidity(t *testing.T) {
 			require.Nil(t, err)
 			proofCl := gethclient.New(rpcClient)
 			receiptCl := ethclient.NewClient(rpcClient)
+			blockCl := ethclient.NewClient(rpcClient)
 
 			// Now create the withdrawal
-			params, err := withdrawals.ProveWithdrawalParameters(context.Background(), proofCl, receiptCl, tx.Hash(), header, l2OutputOracle)
+			params, err := withdrawals.ProveWithdrawalParameters(context.Background(), proofCl, receiptCl, blockCl, tx.Hash(), header, l2OutputOracle, disputeGameFactory, optimismPortal, optimismPortal2)
 			require.Nil(t, err)
 
 			// Obtain our withdrawal parameters
-			withdrawalTransaction := &bindings.TypesWithdrawalTransaction{
+			withdrawal := crossdomain.Withdrawal{
 				Nonce:    params.Nonce,
-				Sender:   params.Sender,
-				Target:   params.Target,
+				Sender:   &params.Sender,
+				Target:   &params.Target,
 				Value:    params.Value,
 				GasLimit: params.GasLimit,
 				Data:     params.Data,
 			}
+			withdrawalTransaction := withdrawal.WithdrawalTransaction()
 			l2OutputIndexParam := params.L2OutputIndex
 			outputRootProofParam := params.OutputRootProof
 			withdrawalProofParam := params.WithdrawalProof
@@ -625,7 +637,7 @@ func TestMixedWithdrawalValidity(t *testing.T) {
 			// Prove withdrawal. This checks the proof so we only finalize if this succeeds
 			tx, err = depositContract.ProveWithdrawalTransaction(
 				transactor.Account.L1Opts,
-				*withdrawalTransaction,
+				withdrawalTransaction,
 				l2OutputIndexParam,
 				outputRootProofParam,
 				withdrawalProofParam,
@@ -662,15 +674,20 @@ func TestMixedWithdrawalValidity(t *testing.T) {
 				require.Equal(t, types.ReceiptStatusSuccessful, proveReceipt.Status)
 
 				// Wait for finalization and then create the Finalized Withdrawal Transaction
-				ctx, cancel = context.WithTimeout(context.Background(), 45*time.Duration(cfg.DeployConfig.L1BlockTime)*time.Second)
+				ctx, cancel = context.WithTimeout(context.Background(), 60*time.Duration(cfg.DeployConfig.L1BlockTime)*time.Second)
 				defer cancel()
-				err = wait.ForFinalizationPeriod(ctx, l1Client, header.Number, cfg.L1Deployments.L2OutputOracleProxy)
-				require.Nil(t, err)
+				if e2eutils.UseFPAC() {
+					err = wait.ForWithdrawalCheck(ctx, l1Client, withdrawal, cfg.L1Deployments.OptimismPortalProxy)
+					require.Nil(t, err)
+				} else {
+					err = wait.ForFinalizationPeriod(ctx, l1Client, header.Number, cfg.L1Deployments.L2OutputOracleProxy)
+					require.Nil(t, err)
+				}
 
 				// Finalize withdrawal
 				_, err = depositContract.FinalizeWithdrawalTransaction(
 					transactor.Account.L1Opts,
-					*withdrawalTransaction,
+					withdrawalTransaction,
 				)
 				require.NoError(t, err)
 			}

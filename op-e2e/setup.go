@@ -91,6 +91,7 @@ func DefaultSystemConfig(t *testing.T) SystemConfig {
 	require.NoError(t, err)
 	deployConfig := config.DeployConfig.Copy()
 	deployConfig.L1GenesisBlockTimestamp = hexutil.Uint64(time.Now().Unix())
+	deployConfig.UseFaultProofs = e2eutils.UseFPAC()
 	e2eutils.ApplyDeployConfigForks(deployConfig)
 	require.NoError(t, deployConfig.Check(), "Deploy config is invalid, do you need to run make devnet-allocs?")
 	l1Deployments := config.L1Deployments.Copy()
@@ -743,17 +744,35 @@ func (cfg SystemConfig) Start(t *testing.T, _opts ...SystemConfigOption) (*Syste
 	}
 
 	// L2Output Submitter
-	proposerCLIConfig := &l2os.CLIConfig{
-		L1EthRpc:          sys.EthInstances["l1"].WSEndpoint(),
-		RollupRpc:         sys.RollupNodes["sequencer"].HTTPEndpoint(),
-		L2OOAddress:       config.L1Deployments.L2OutputOracleProxy.Hex(),
-		PollInterval:      50 * time.Millisecond,
-		TxMgrConfig:       newTxMgrConfig(sys.EthInstances["l1"].WSEndpoint(), cfg.Secrets.Proposer),
-		AllowNonFinalized: cfg.NonFinalizedProposals,
-		LogConfig: oplog.CLIConfig{
-			Level:  log.LvlInfo,
-			Format: oplog.FormatText,
-		},
+	var proposerCLIConfig *l2os.CLIConfig
+	if e2eutils.UseFPAC() {
+		proposerCLIConfig = &l2os.CLIConfig{
+			L1EthRpc:          sys.EthInstances["l1"].WSEndpoint(),
+			RollupRpc:         sys.RollupNodes["sequencer"].HTTPEndpoint(),
+			DGFAddress:        config.L1Deployments.DisputeGameFactoryProxy.Hex(),
+			ProposalInterval:  6 * time.Second,
+			DisputeGameType:   0,
+			PollInterval:      50 * time.Millisecond,
+			TxMgrConfig:       newTxMgrConfig(sys.EthInstances["l1"].WSEndpoint(), cfg.Secrets.Proposer),
+			AllowNonFinalized: cfg.NonFinalizedProposals,
+			LogConfig: oplog.CLIConfig{
+				Level:  log.LvlInfo,
+				Format: oplog.FormatText,
+			},
+		}
+	} else {
+		proposerCLIConfig = &l2os.CLIConfig{
+			L1EthRpc:          sys.EthInstances["l1"].WSEndpoint(),
+			RollupRpc:         sys.RollupNodes["sequencer"].HTTPEndpoint(),
+			L2OOAddress:       config.L1Deployments.L2OutputOracleProxy.Hex(),
+			PollInterval:      50 * time.Millisecond,
+			TxMgrConfig:       newTxMgrConfig(sys.EthInstances["l1"].WSEndpoint(), cfg.Secrets.Proposer),
+			AllowNonFinalized: cfg.NonFinalizedProposals,
+			LogConfig: oplog.CLIConfig{
+				Level:  log.LvlInfo,
+				Format: oplog.FormatText,
+			},
+		}
 	}
 	proposer, err := l2os.ProposerServiceFromCLIConfig(context.Background(), "0.0.1", proposerCLIConfig, sys.Cfg.Loggers["proposer"])
 	if err != nil {

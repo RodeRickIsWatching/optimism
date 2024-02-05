@@ -136,6 +136,8 @@ jobs:
   pnpm-monorepo:
     docker:
       - image: <<pipeline.parameters.ci_builder_image>>
+    environment:
+      DEVNET_FPAC: "true"
     resource_class: xlarge
     steps:
       - checkout
@@ -858,6 +860,7 @@ jobs:
             # need to explicitly set it here to prevent Cannon from running when we don't
             # want it to.
             export OP_E2E_CANNON_ENABLED="false"
+            export OP_E2E_USE_FPAC="true"
             # Note: We don't use circle CI test splits because we need to split by test name, not by package. There is an additional
             # constraint that gotestsum does not currently (nor likely will) accept files from different pacakges when building.
             JUNIT_FILE=/tmp/test-results/<<parameters.module>>_<<parameters.target>>.xml make <<parameters.target>> 2>&1 | tee /testlogs/test.log
@@ -996,6 +999,8 @@ jobs:
     docker:
       - image: <<pipeline.parameters.ci_builder_image>>
     resource_class: xlarge
+    environment:
+      DEVNET_FPAC: "true"
     steps:
       - checkout
       - restore_cache:

@@ -88,6 +88,7 @@ func init() {
 		return
 	}
 
+	log.Warn("Using genesis files", "l1AllocsPath", l1AllocsPath, "l1DeploymentsPath", l1DeploymentsPath, "deployConfigPath", deployConfigPath)
 	L1Allocs, err = genesis.NewStateDump(l1AllocsPath)
 	if err != nil {
 		panic(err)
