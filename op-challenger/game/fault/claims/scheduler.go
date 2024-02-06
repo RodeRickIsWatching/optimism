@@ -18,6 +18,7 @@ type Scheduler interface {
 	Start(context.Context)
 	Close() error
 	Schedule(schedulerMessage) error
+	Drain()
 }
 
 type BondClaimer interface {
@@ -57,7 +58,11 @@ func (s *BondClaimScheduler) Start(ctx context.Context) {
 }
 
 func (s *BondClaimScheduler) Close() error {
-	return s.scheduler.Close()
+	if err := s.scheduler.Close(); err != nil {
+		return err
+	}
+	s.scheduler.Drain()
+	return nil
 }
 
 func (s *BondClaimScheduler) Schedule(blockNumber uint64, games []types.GameMetadata) error {

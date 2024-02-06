@@ -44,6 +44,17 @@ func (s *Scheduler[T]) Close() error {
 	return nil
 }
 
+// Drain drains the scheduler's processing channel.
+func (s *Scheduler[T]) Drain() {
+	for {
+		select {
+		case <-s.receiver:
+		default:
+			return
+		}
+	}
+}
+
 func (s *Scheduler[T]) run(ctx context.Context) {
 	defer s.wg.Done()
 	for {

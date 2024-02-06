@@ -13,12 +13,11 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
-var _ Scheduler = (*LargePreimageScheduler)(nil)
-
 type Scheduler interface {
 	Start(context.Context)
 	Close() error
 	Schedule(common.Hash) error
+	Drain()
 }
 
 type Challenger interface {
@@ -73,7 +72,11 @@ func (s *LargePreimageScheduler) Start(ctx context.Context) {
 }
 
 func (s *LargePreimageScheduler) Close() error {
-	return s.scheduler.Close()
+	if err := s.scheduler.Close(); err != nil {
+		return err
+	}
+	s.scheduler.Drain()
+	return nil
 }
 
 func (s *LargePreimageScheduler) Schedule(blockHash common.Hash) error {
